@@ -1,0 +1,316 @@
+---
+title: "SMART_analysis"
+output:
+  html_document: default
+  pdf_document: default
+  word_document: default
+---
+
+```{r setup, include=TRUE}
+knitr::opts_chunk$set(echo = TRUE)
+
+##set the working directory
+setwd ("yourpath")
+
+##to remove all
+rm(list=ls(all=TRUE))
+
+
+
+ if (!require("lme4")) install.packages("lme4")
+ if (!require("lmerTest")) install.packages("lmerTest")
+ if (!require("effects")) install.packages("effects")
+ if (!require("MuMIn")) install.packages ("MuMIn")
+ if (!require("multcomp")) install.packages("multcomp")
+ if (!require("psych")) install.packages("psych")
+ if (!require("randomForest")) install.packages("randomForest")
+ if (!require("party")) install.packages("party")
+ if (!require("dplyr")) install.packages("dplyr")
+ if (!require("magrittr")) install.packages("magrittr")
+ if (!require("tidyr")) install.packages("tidyr")
+ if (!require("car")) install.packages("car")
+ if (!require("ggplot2")) install.packages("ggplot2")
+ if (!require("scales")) install.packages("scales")
+ if (!require("caret")) install.packages("caret")
+ if (!require("e1071")) install.packages("e1071")
+ if (!require("ggpubr")) install.packages("ggpubr")
+ if (!require("cowplot")) install.packages("cowplot")
+ if (!require("Rcpp")) install.packages('Rcpp', dependencies= TRUE)
+
+#load packages
+ library(lme4)
+ library(lmerTest)
+ library(effects)
+ library(MuMIn)
+ library(multcomp)
+ library(psych)
+ library(randomForest)
+ library(party)
+ library(dplyr)
+ library(magrittr)
+ library(tidyr)
+ library(car)
+ library(ggplot2)
+ library(scales)
+ library(caret)
+ library(e1071)
+ library(Rcpp)
+ library(RColorBrewer)
+ library(ggpubr)
+ library(cowplot)
+
+ProjectHome= ("yourpath")
+
+```
+
+#Upload database
+```{r, include=TRUE}
+df2<- read_sav("file.sav")
+```
+
+#Random forests
+Select variables in database
+```{r, eval=TRUE}
+dat=select(df2, Accuracy, num_cluster_switches_divided, avg_cluster_size_divided, frequencyanimal_avg, lexRT_avg, AoAanimal_avg, concretenessanimal_avg, lengthOr_avg, lengthanimal_avg, orthneighanimal_avg, phonneighanimal_avg)#mtry = 4 (num of variables divided by 3)
+```
+
+#Specify the minimum number of trees that gives us the best accuracy
+```{r, eval=TRUE}
+ set.seed(33)
+ S=seq(100, 4000, 50)#from 20 to 5000 in steps of 20
+ RFoutput = matrix(,length(S),3)%>%as.data.frame()
+ colnames(RFoutput)=c("nTrees","Accuracy","Kappa")
+
+ for (s in 1:length(S)){
+ trees=S[s]
+ fit <- cforest(Accuracy ~ . , data = dat, control=cforest_unbiased(mtry=4,ntree=trees, minsplit = 15, minbucket = 5))
+ RFoutput[s,1]=trees[1]
+ RFoutput[s,2]=caret:::cforestStats(fit)[1]#accuracy
+ RFoutput[s,3]=caret:::cforestStats(fit)[2]#kappa
+ rm(fit, trees)
+ }
+
+ plot(RFoutput$nTrees,RFoutput$Accuracy, type="l")
+ plot(RFoutput$nTrees,RFoutput$Kappa)
+
+ set.seed(33)
+ fit <- cforest(Accuracy ~ . , data = dat, control=cforest_unbiased(mtry=4,ntree=350, minsplit = 15, minbucket = 5))
+ ImpFit<-varimp(fit, conditional=TRUE)
+ 
+```
+
+```{r, eval=TRUE, dev='pdf'}
+ dotplot(sort(ImpFit),  scale=list(cex=1.5), xlab="Variable Importance in fluency for predicting total number of words\n(predictors to right of dashed vertical line are informative)", panel = function(x,y){
+   panel.dotplot(x, y, col='darkblue', pch=16, cex=1.1)
+   panel.abline(v=abs(min(ImpFit)), col='red', lty='longdash', lwd=2)
+ }
+ )
+```
+
+#Repeated k-fold cross-validation for cforest (Metrics Cforest)
+```{r, eval=TRUE}
+ totalsamplesize = nrow(dat)
+ kfold = nrow(dat)
+ nsamples=1
+
+ predictionscf=data.frame("foldK" = rep(NA,nsamples*totalsamplesize), "sampleS"= rep(NA,nsamples*totalsamplesize), "predicted"= rep(NA,nsamples*totalsamplesize),"actual"= rep(NA,nsamples*totalsamplesize))
+ metricscf=data.frame("R2"= rep(NA,nsamples), "RMSE"= rep(NA,nsamples), "MAE"= rep(NA,nsamples)) 
+ for (s in 1:nsamples){
+   set.seed(s)
+   # create partition
+   inTest=createFolds(dat$Accuracy, k=kfold, returnTrain = FALSE)
+     for (f in 1:kfold) {
+       #pick a fold for testing
+       dat.train <- dat[-unlist(inTest[f]),]
+       dat.test <- dat[unlist(inTest[f]),]
+       # train the model
+       set.seed(22)
+       datcf <- cforest(Accuracy ~ . , data = dat.train, control=cforest_unbiased(mtry=10,ntree=350, minsplit = 15, minbucket = 4))
+       beginning=(min(which(is.na(predictionscf$predicted))))
+       ending=(beginning-1)+nrow(dat.test)
+       #save fold and sample N
+       predictionscf$sampleS[beginning:ending] = s
+       predictionscf$foldK[beginning:ending] = f
+       #predict the outcome of the testing data
+       predictionscf$predicted[beginning:ending] <- unlist(predict(datcf, newdata=dplyr:::select(dat.test,-Accuracy), type="response"))
+       #calculate and save variance explained
+       predictionscf$actual[beginning:ending] <- dat.test$Accuracy
+     }
+
+
+       #save metrics, for continuous Criterion variable
+         ind1=ifelse(s>1,(s-1)*totalsamplesize+1,1)
+         ind2=ind1+(totalsamplesize-1)
+         metricscf$R2[s] = 1-(sum((predictionscf$actual[ind1:ind2]-predictionscf$predicted[ind1:ind2])^2)/sum((predictionscf$actual[ind1:ind2]-mean(predictionscf$actual[ind1:ind2]))^2))
+         metricscf$RMSE[s] = RMSE(predictionscf$predicted[ind1:ind2], predictionscf$actual[ind1:ind2])
+         metricscf$MAE[s]=MAE(predictionscf$predicted[ind1:ind2], predictionscf$actual[ind1:ind2])
+ }
+
+ # get metrics, for continuous variables, when using nFold cross validation
+ DescriptivesAvgCforest = data.frame("R2" = c(mean(metricscf$R2),median(metricscf$R2),sd(metricscf$R2)),"RMSE" = c(mean(metricscf$RMSE),median(metricscf$RMSE),sd(metricscf$RMSE)),"MAE" = c(mean(metricscf$MAE),median(metricscf$MAE),sd(metricscf$MAE)))
+ rownames(DescriptivesAvgCforest)= c("mean", "median","sd")
+ print(DescriptivesAvgCforest)
+
+ print(metricscf)
+
+```
+
+#Metrics Cforest calculated with values only ranking high in Conditional permutation importance (CPI)
+```{r, eval=TRUE}
+ dat.important=dplyr:::select(dat, Accuracy, num_cluster_switches, avg_cluster_size, lengthanimal_avg, frequencyanimal_avg)
+ #repeated k-fold cross-validation  for cforest
+ totalsamplesize = nrow(dat.important)
+ kfold = nrow(dat.important)
+ nsamples=1
+
+predictionscf.important=data.frame("foldK" = rep(NA,nsamples*totalsamplesize), "sampleS"= rep(NA,nsamples*totalsamplesize), "predicted"= rep(NA,nsamples*totalsamplesize),"actual"= rep(NA,nsamples*totalsamplesize))
+ metricscf.important=data.frame("R2"= rep(NA,nsamples), "RMSE"= rep(NA,nsamples), "MAE"= rep(NA,nsamples)) 
+
+
+ for (s in 1:nsamples){
+   set.seed(s)
+   # create partition
+   inTest=createFolds(dat.important$Accuracy, k=kfold, returnTrain = FALSE)
+     for (f in 1:kfold) {
+       #pick a fold for testing
+       dat.train <- dat.important[-unlist(inTest[f]),]
+       dat.test <- dat.important[unlist(inTest[f]),]
+       # train the model
+       set.seed(22)
+       datcf <- cforest(Accuracy ~ . , data = dat.train, control=cforest_unbiased(mtry=2,ntree=350, minsplit = 15, minbucket = 5))# Fit conditional random forest
+       #identify indexes where to save data predictions
+       beginning=(min(which(is.na(predictionscf.important$predicted))))
+       ending=(beginning-1)+nrow(dat.test)
+       #save fold and sample N
+       predictionscf.important$sampleS[beginning:ending] = s
+       predictionscf.important$foldK[beginning:ending] = f
+       #predict the outcome of the testing data
+       predictionscf.important$predicted[beginning:ending] <- unlist(predict(datcf, newdata=dplyr:::select(dat.test,-Accuracy), type="response"))
+       #calculate and save variance explained
+       predictionscf.important$actual[beginning:ending] <- dat.test$Accuracy
+     }
+
+       #save metrics, for continuous Criterion variable
+         ind1=ifelse(s>1,(s-1)*totalsamplesize+1,1)
+         ind2=ind1+(totalsamplesize-1)
+         metricscf.important$R2[s] = 1-(sum((predictionscf.important$actual[ind1:ind2]-predictionscf.important$predicted[ind1:ind2])^2)/sum((predictionscf.important$actual[ind1:ind2]-mean(predictionscf.important$actual[ind1:ind2]))^2))
+         metricscf.important$RMSE[s] = RMSE(predictionscf.important$predicted[ind1:ind2], predictionscf.important$actual[ind1:ind2])
+         metricscf.important$MAE[s]=MAE(predictionscf.important$predicted[ind1:ind2], predictionscf.important$actual[ind1:ind2])
+ }
+
+ # get metrics, for continuous variables, when using nFold cross validation
+ DescriptivesAvgCforest.important = data.frame("R2" = c(mean(metricscf.important$R2),median(metricscf.important$R2),sd(metricscf.important$R2)),"RMSE" = c(mean(metricscf.important$RMSE),median(metricscf.important$RMSE),sd(metricscf.important$RMSE)),"MAE" = c(mean(metricscf.important$MAE),median(metricscf.important$MAE),sd(metricscf.important$MAE)))
+ rownames(DescriptivesAvgCforest.important)= c("mean", "median","sd")
+ print(DescriptivesAvgCforest.important)
+
+ print(metricscf.important)
+
+```
+
+```{r, eval=TRUE}
+ save(fit, ImpFit, predictionscf, metricscf, dat, predictionscf.important, metricscf.important, dat.important, file = paste(ProjectHome,"RFsDataResults_sem_no_demo.RData",sep=""))
+```
+
+```{r, eval=TRUE}
+ rm(list= ls()[!(ls() %in% c('ProjectHome'))])
+ load(paste(ProjectHome,"RFsDataResults_sem_no_demo.RData",sep=""))
+```
+
+#Conditional inference trees: effect of each predictor ranking high in CPI, as per random forest
+```{r dev='pdf'}
+ Change.ctree1 = ctree(Accuracy ~ num_cluster_switches, data=dat);plot(Change.ctree1)
+ caret:::cforestStats(Change.ctree1)
+```
+
+```{r dev='pdf'}
+ Change.ctree1 = ctree(Accuracy ~ avg_cluster_size, data=dat);plot(Change.ctree1)
+ caret:::cforestStats(Change.ctree1)
+```
+
+```{r dev='pdf'}
+ Change.ctree1 = ctree(Accuracy ~ frequencyanimal_avg, data=dat);plot(Change.ctree1)
+ caret:::cforestStats(Change.ctree1)
+```
+
+```{r dev='pdf'}
+ Change.ctree1 = ctree(Accuracy ~ lengthanimal_avg, data=dat);plot(Change.ctree1)
+ caret:::cforestStats(Change.ctree1)
+```
+
+#Ctree plotting with predictors ranking high in CPI and showing splits when plotted individually
+```{r dev='pdf'}
+tiff(filename = "Ctree.tiff", width = 400,
+     height = 231, units = "mm", res = 300,
+     compression = "zip")
+plot(ctree(Accuracy ~ num_cluster_switches + avg_cluster_size + frequencyanimal_avg,  data = dat, controls=ctree_control(maxdepth=2)))
+
+```
+
+#Metrics ctree (Repeated k-fold cross-validation) 
+```{r, eval=TRUE}
+ totalsamplesize=nrow(dat)
+ kfold = nrow(dat.important)
+ nsamples=1
+
+ predictionsct=data.frame("foldK" = rep(NA,nsamples*totalsamplesize), "sampleS"= rep(NA,nsamples*totalsamplesize), "predicted"= rep(NA,nsamples*totalsamplesize),"actual"= rep(NA,nsamples*totalsamplesize))
+
+ metricsct=data.frame("R2"= rep(NA,nsamples), "RMSE"= rep(NA,nsamples), "MAE"= rep(NA,nsamples))
+
+ for (s in 1:nsamples){
+   set.seed(s)
+   # create partition
+   inTest=createFolds(dat$Accuracy, k=kfold, returnTrain = FALSE)
+     for (f in 1:kfold) {
+       #pick a fold for testing
+       dat.train <- dat[-unlist(inTest[f]),]
+       dat.test <- dat[unlist(inTest[f]),]
+       # train the model
+       datct <- ctree(Accuracy ~ num_cluster_switches + avg_cluster_size + frequencyanimal_avg + lengthanimal_avg, dat.train) ##HERE ADD VARIABLES? 
+       #identify indexes where to save data predictions
+       beginning=(min(which(is.na(predictionsct$predicted))))
+       ending=(beginning-1)+nrow(dat.test)
+       #save fold and sample N
+       predictionsct$sampleS[beginning:ending] = s
+       predictionsct$foldK[beginning:ending] = f
+       #predict the outcome of the testing data
+       predictionsct$predicted[beginning:ending] <- unlist(predict(datct, newdata=dplyr:::select(dat.test, -Accuracy), type="response"))
+       #calculate and save variance explained
+       predictionsct$actual[beginning:ending] <- dat.test$Accuracy
+     }
+
+       #save metrics, for continuous Criterion variable
+         ind1=ifelse(s>1,(s-1)*totalsamplesize+1,1)
+         ind2=ind1+(totalsamplesize-1)
+         metricscf$R2[s] = 1-(sum((predictionsct$actual[ind1:ind2]-predictionsct$predicted[ind1:ind2])^2)/sum((predictionsct$actual[ind1:ind2]-mean(predictionsct$actual[ind1:ind2]))^2))
+         metricscf$RMSE[s] = RMSE(predictionsct$predicted[ind1:ind2], predictionsct$actual[ind1:ind2])
+         metricscf$MAE[s]=MAE(predictionsct$predicted[ind1:ind2], predictionsct$actual[ind1:ind2])
+         
+ }
+
+ # get metrics, for continuous variables, when using nFold cross validation
+ DescriptivesCtree = data.frame("R2" = c(mean(metricscf$R2),median(metricscf$R2),sd(metricscf$R2)),"RMSE" = c(mean(metricscf$RMSE),median(metricscf$RMSE),sd(metricscf$RMSE)),"MAE" = c(mean(metricscf$MAE),median(metricscf$MAE),sd(metricscf$MAE)))
+ rownames(DescriptivesCtree)= c("mean", "median","sd")
+ print(DescriptivesCtree)
+
+ print(metricscf)
+```
+
+#Statistics for ctree nodes
+```{r, eval=TRUE}
+if (!require("partykit")) install.packages("partykit")
+if (!require("strucchange")) install.packages("strucchange")
+library(partykit)
+library(strucchange)
+library(party)
+
+a=ctree(Accuracy ~ num_cluster_switches + avg_cluster_size + frequencyanimal_avg, data = dat)
+
+a=ctree(Accuracy ~ num_cluster_switches + avg_cluster_size + frequencyanimal_avg,  data = dat,maxdepth=2)
+
+sctest.constparty(a, node=1) #top node of tree
+
+sctest.constparty(a, node=5)
+
+sctest.constparty(a, node=2)
+
+```
